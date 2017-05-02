@@ -96,3 +96,9 @@ ENV/
 
 # mkdocs documentation
 /site
+
+# custom
+majka*
+output
+.spiderpig
+data
