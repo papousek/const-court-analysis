@@ -31,31 +31,35 @@ def _get_words(text):
 
 
 @sp.cached()
-def get_morphodita_words(text):
-    response = requests.post('http://lindat.mff.cuni.cz/services/morphodita/api/tag?output=json', data={'data': text})
-    return [word['lemma'] for sentence in json.loads(response.text)['result'] for word in sentence]
+def get_morphodita_words(filename):
+    with open(filename, 'r') as f:
+        text = f.read()
+        response = requests.post('http://lindat.mff.cuni.cz/services/morphodita/api/tag?output=json', data={'data': text})
+        return [word['lemma'] for sentence in json.loads(response.text)['result'] for word in sentence]
 
 
 @sp.cached()
-def get_majka_words(text):
-    result = []
-    for word in _get_words(text):
-        result.append(get_majka_lemma(word))
-    return result
+def get_majka_words(filename):
+    with open(filename, 'r') as f:
+        text = f.read()
+        result = []
+        for word in _get_words(text):
+            result.append(get_majka_lemma(word))
+        return result
 
 
 def get_words(filename, method='majka'):
-    with open(filename, 'r') as f:
-        text = f.read()
-        if method == 'raw':
+    if method == 'raw':
+        with open(filename, 'r') as f:
+            text = f.read()
             result = []
             for word in _get_words(text):
                 result.append(word)
             return result
-        elif method == 'majka':
-            return get_majka_words(text)
-        elif method == 'morphodita':
-            return get_morphodita_words(text)
+    elif method == 'majka':
+        return get_majka_words(filename)
+    elif method == 'morphodita':
+        return get_morphodita_words(filename)
 
 
 @sp.cached()
