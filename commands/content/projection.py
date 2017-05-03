@@ -1,12 +1,14 @@
 from clint.textui import progress
 from pylab import rcParams
-from gensim import corpora, models
+from gensim import corpora, models, matutils
+from sklearn.manifold import TSNE, SpectralEmbedding
 import json
 import matplotlib.pyplot as plt
 import output
 import pandas
 import re
 import requests
+import seaborn as sns
 import spiderpig as sp
 import subprocess
 
@@ -88,40 +90,71 @@ def get_corpus(decision_type=None, limit=None, method='raw'):
 
 
 @sp.cached()
-def get_transformation(groups, decision_type=None, limit=None, method='raw'):
+def get_corr(decision_type=None, limit=None, method='raw'):
     _, corpus, dictionary = get_corpus(decision_type=decision_type, limit=limit, method=method)
     tfidf = models.TfidfModel(corpus)
     corpus_tfidf = tfidf[corpus]
-    lsi = models.LsiModel(corpus_tfidf, id2word=dictionary, num_topics=groups)
-    return lsi
+    matrix = pandas.DataFrame(matutils.corpus2dense(corpus_tfidf, num_terms=len(dictionary)))
+    return matrix.corr()
+
 
 
 @sp.cached()
-def get_projection(decision_type=None, limit=None, method='raw'):
+def get_gensim_model(name, groups, decision_type=None, limit=None, method='raw'):
+    _, corpus, dictionary = get_corpus(decision_type=decision_type, limit=limit, method=method)
+    tfidf = models.TfidfModel(corpus)
+    corpus_tfidf = tfidf[corpus]
+    mapping = {
+        'lsi': models.LsiModel,
+        'lda': models.LdaModel,
+        'tfidf': models.TfidfModel,
+    }
+    kwargs = {}
+    if name != 'tfidf':
+        kwargs['num_topics'] = groups
+    model = mapping[name](corpus_tfidf, id2word=dictionary, **kwargs)
+    topics = None
+    if hasattr(model, 'print_topics'):
+        topics = []
+        for t in model.print_topics():
+            topics.append(t[1])
+    return model, topics
+
+
+@sp.cached()
+def get_projection(decision_type=None, limit=None, method='raw', trans_method='lda'):
     ecli_judge = load_records(decision_type=decision_type, limit=limit).set_index('Identifikátor evropské judikatury')['Soudce zpravodaj'].to_dict()
-    transformation = get_transformation(2, decision_type=decision_type, limit=limit, method=method)
-    eclis, corpus, _ = get_corpus(decision_type=decision_type, limit=limit, method=method)
+    eclis, corpus, dictionary = get_corpus(decision_type=decision_type, limit=limit, method=method)
     result = []
-    for ecli, data in zip(eclis, transformation[corpus]):
-        judge = ecli_judge[ecli]
-        result.append({
-            'judge': judge,
-            'ecli': ecli,
-            'x': data[0][1],
-            'y': data[1][1],
-        })
+    if trans_method in ['lda', 'lsi', 'tfidf']:
+        transformation, _ = get_gensim_model(trans_method, 2, decision_type=decision_type, limit=limit, method=method)
+        for ecli, data in zip(eclis, transformation[corpus]):
+            data = dict(data)
+            judge = ecli_judge[ecli]
+            result.append({
+                'judge': judge,
+                'ecli': ecli,
+                'x': data.get(0, 0),
+                'y': data.get(1, 0),
+            })
+    else:
+        matrix = get_corr(decision_type=decision_type, limit=limit)
+        if trans_method == 'tsne':
+            model = TSNE(n_components=2)
+        elif trans_method == 'spectral':
+            model = SpectralEmbedding(n_components=2)
+        for ecli, data in zip(eclis, model.fit_transform(matrix)):
+            judge = ecli_judge[ecli]
+            result.append({
+                'judge': judge,
+                'ecli': ecli,
+                'x': data[0],
+                'y': data[1],
+            })
     return pandas.DataFrame(result)
 
 
-def get_topics(decision_type=None, limit=None, method='raw'):
-    transformation = get_transformation(2, decision_type=decision_type, limit=limit, method=method)
-    result = []
-    for t in transformation.print_topics():
-        result.append(t[1])
-    return result
-
-
-def plot_judge_projection(projection, topics):
+def plot_judge_projection(projection):
     projection = projection[['judge', 'x', 'y']].groupby(['judge']).mean().reset_index().sort_values(by='judge')
     projection['judge_acronym'] = projection['judge'].apply(lambda name: '{}{}'.format(name.split()[0][:3], name.split()[1][0]))
     rcParams['figure.figsize'] = 10, 10
@@ -129,13 +162,25 @@ def plot_judge_projection(projection, topics):
         plt.scatter(x, y, label='{}: {}'.format(acronym, judge), color='white', linewidth=0)
         plt.scatter(x, y, color='black')
         plt.text(x, y, acronym, fontsize='small', )
-    plt.xlabel(' + '.join([t for t in topics[0].split() if t != '+'][:3]) + ' + ...')
-    plt.ylabel(' + '.join([t for t in topics[1].split() if t != '+'][:3]) + ' + ...')
-    plt.legend(loc='center left', fontsize='xx-small', bbox_to_anchor=(0.95, 0.5))
-    output.savefig('content_projection')
+    plt.legend(loc='center left', fontsize='xx-small', bbox_to_anchor=(0.98, 0.5))
+    output.savefig('judge_projection')
 
 
-def execute(limit=None, method='raw'):
-    projection = get_projection(decision_type='Nález', limit=limit, method=method)
-    topics = get_topics(decision_type='Nález', limit=limit, method=method)
-    plot_judge_projection(projection, topics)
+def plot_projection(projection):
+    projection = projection.sort_values(by='judge')
+    xmin, xmax = projection['x'].quantile(0.01), projection['x'].quantile(0.99)
+    ymin, ymax = projection['y'].quantile(0.01), projection['y'].quantile(0.99)
+    g = sns.FacetGrid(projection, col='judge', col_wrap=5, ylim=(ymin, ymax), xlim=(xmin, xmax))
+    g.map(plt.scatter, 'x', 'y', alpha=0.5).set_titles('{col_name}')
+    output.savefig('projection')
+
+
+def execute(limit=None, method='raw', trans_method='lda'):
+    projection = get_projection(decision_type='Nález', limit=limit, method=method, trans_method=trans_method)
+    if trans_method in ['lsi', 'lda', 'tfidf']:
+        _, topics = get_gensim_model(trans_method, 2, decision_type='Nález', limit=limit, method=method)
+        if topics is not None:
+            print('X', topics[0])
+            print('Y', topics[1])
+    plot_projection(projection)
+    plot_judge_projection(projection)
